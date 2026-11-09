@@ -1627,7 +1627,7 @@ function loadBhl(start, rows, scroll) {
     return cancelSearch("No names were found to search BHL");
   }
 
-  var url = source + "?" + query + "&start=" + start + "&rows=" + rows;
+  var url = source + "?" + query + "&start=" + start + "&rows=" + rows + "&fulltext=true";
   var buf = "";
   $("#status-box").css("display", "block");
   $("#bhl-results-list").html("");
