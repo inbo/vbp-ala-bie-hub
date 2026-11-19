@@ -641,20 +641,25 @@ function loadPluginTabs() {
       $.each(pluginTabs.split(","), function(idx, pluginTab) {
         $.each(pluginTabsConfig, function(idx, tabConfig) {
           if (tabConfig.tab == pluginTab) {
-            var tabSpeciesList = tabConfig.speciesList;
             $.getJSON(
-              SHOW_CONF.speciesListServiceUrl +
-              "/ws/species/" +
-              SHOW_CONF.guid +
-              "?dr=" +
-              tabSpeciesList,
-              function(data) {
-                if (data && data.length > 0) {
-                  var speciesList = data[0];
-                  renderPluginTab(speciesList, tabConfig);
-                } // TODO exception handler
+              SHOW_CONF.speciesListServiceUrl + "/v2/species",
+              {
+                speciesListIDs: tabConfig.speciesList,
+                guids: SHOW_CONF.guid,
               },
-            );
+            )
+              .done(function(data) {
+                if (data && data.length > 0) {
+                  renderPluginTab(data[0], tabConfig);
+                }
+              })
+              .fail(function(jqXHR, textStatus, errorThrown) {
+                console.error("Failed to load plugin species list", {
+                  tab: tabConfig.tab,
+                  status: textStatus,
+                  error: errorThrown,
+                });
+              });
           }
         });
       });
@@ -681,10 +686,12 @@ function renderPluginTab(speciesList, tabMetadata) {
 
 function loadPluginTab(speciesList, tabMetadata) {
   var tabContentKey = tabMetadata.contentKey;
-  var kvpValues = speciesList.kvpValues;
+  var kvpValues = speciesList.properties || speciesList.kvpValues || [];
 
   const contentFilePath = kvpValues.find(kvp => kvp.key === tabContentKey)?.value;
-  const ecopediaCommonName = kvpValues.find(kvp => kvp.key === 'commonName')?.value;
+  const ecopediaCommonName = kvpValues.find(
+    kvp => kvp.key === 'commonName' || kvp.key === 'CommonNames',
+  )?.value;
   const ecopediaNodeType = kvpValues.find(kvp => kvp.key === 'nodeType')?.value;
 
   if (contentFilePath) {
