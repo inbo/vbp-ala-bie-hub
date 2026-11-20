@@ -59,6 +59,7 @@ class ExternalSiteService implements GrailsConfigurationAware {
     int wikipediaSearchLimit
     Pattern wikipediaTaxonTemplatePattern
     String wikipediaKingdomLabel
+    boolean wikipediaExactPageFirst
 
     String ecopediaUrl
     String ecopediaUsername
@@ -89,6 +90,9 @@ class ExternalSiteService implements GrailsConfigurationAware {
         // e.g. nl.wikipedia uses "Taxobox", "Taxobox zoogdier", "Taxobox insect", ...
         wikipediaTaxonTemplatePattern = Pattern.compile(config.getProperty("wikipedia.taxonTemplatePattern", '"(Speciesbox|Automatic taxobox|Taxobox)"'))
         wikipediaKingdomLabel = config.getProperty("wikipedia.kingdomLabel", "kingdom").toLowerCase()
+        // Wikis that title articles by common name (e.g. nl) rank subspecies above the species
+        // article in search results; the exact scientific-name page redirects to the right one.
+        wikipediaExactPageFirst = config.getProperty("wikipedia.exactPageFirst", Boolean, false)
     }
 
     /**
@@ -236,6 +240,12 @@ class ExternalSiteService implements GrailsConfigurationAware {
         // Try a version with any subgenus parenthetical removed first (if applicable), then the supplied name.
         List<String> searchNames = buildSearchNames(name)
         for (String searchName : searchNames) {
+            if (wikipediaExactPageFirst) {
+                def exact = tryExactPage(searchName, expectedKingdom)
+                if (exact?.html) {
+                    return exact
+                }
+            }
             def candidates = searchWikipediaCandidates(searchName, snippetPattern)
             def result = evaluateCandidates(candidates, name, expectedKingdom)
             if (result?.html) {
