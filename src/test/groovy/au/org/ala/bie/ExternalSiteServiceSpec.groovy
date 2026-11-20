@@ -39,6 +39,12 @@ class ExternalSiteServiceSpec extends Specification implements ServiceUnitTest<E
     def setup() {
         server = new ErsatzServer()
         server.reportToConsole()
+        grailsApplication.config.wikipedia.url = server.httpUrl + '/page/html/'
+        grailsApplication.config.wikipedia.api = server.httpUrl + '/api.php'
+        grailsApplication.config.wikipedia.lang = 'en'
+        grailsApplication.config.wikipedia.host = 'wikipedia.org'
+        grailsApplication.config.wikipedia.snippetPattern = '(?i)species|genus|family|order|class|phylum|kingdom|australia|endemic'
+        grailsApplication.config.wikipedia.searchLimit = 20
         service.setConfiguration(grailsApplication.config)
 
         String allowedElements = "h2,div,a,br,i,b,span,ul,li,p,sup"
@@ -79,6 +85,693 @@ class ExternalSiteServiceSpec extends Specification implements ServiceUnitTest<E
         return slurper.parse(this.class.getResource(resource), 'UTF-8')
     }
 
+
+    void "test search Wikipedia returns taxon article for exact scientific name"() {
+        given:
+        server.expectations {
+            get('/api.php') {
+                query('action', 'query')
+                query('list', 'search')
+                query('srsearch', 'intitle:"Acipenser brevirostrum"')
+                query('srnamespace', '0')
+                query('srlimit', '20')
+                query('utf8', '1')
+                query('format', 'json')
+                called(1)
+                responder {
+                    encoder(ContentType.APPLICATION_JSON, Map, Encoders.json)
+                    code(200)
+                    body([
+                            query: [
+                                    search: [
+                                            [ns: 0, title: 'Acipenser brevirostrum', snippet: 'a <span class="searchmatch">species</span> of sturgeon']
+                                    ]
+                            ]
+                    ], ContentType.APPLICATION_JSON)
+                }
+            }
+            get('/page/html/Acipenser_brevirostrum') {
+                called(1)
+                responder {
+                    code(200)
+                    body('<section><table class="infobox biota">Scientific classification</table></section>', ContentType.TEXT_HTML)
+                }
+            }
+        }
+
+        when:
+        def response = service.searchWikipedia('Acipenser brevirostrum')
+
+        then:
+        response != null
+        response.title == 'Acipenser_brevirostrum'
+        response.html.contains('infobox biota')
+    }
+
+    void "test fetch Wikipedia override loads exact page without taxon checks"() {
+        given:
+        service.wikipediaUrl = server.httpUrl + '/page/html/'
+        server.expectations {
+            get('/page/html/Algae_(food)') {
+                called(1)
+                responder {
+                    code(200)
+                    body('<section><p>Wikipedia content without a kingdom classification.</p></section>', ContentType.TEXT_HTML)
+                }
+            }
+        }
+
+        when:
+        def response = service.fetchWikipediaUrl('https://en.wikipedia.org/wiki/Algae_(food)')
+
+        then:
+        response.title == 'Algae_(food)'
+        response.html.contains('without a kingdom classification')
+    }
+
+    void "test fetch Wikipedia override rejects non-Wikipedia URL"() {
+        when:
+        def response = service.fetchWikipediaUrl('https://example.org/wiki/Some_page')
+
+        then:
+        response.title == null
+        response.html == ''
+    }
+
+    void "test fetch Wikipedia override uses configured host"() {
+        given:
+        service.wikipediaHost = 'wiki.example.org'
+        service.wikipediaUrl = server.httpUrl + '/page/html/'
+        server.expectations {
+            get('/page/html/Configured_page') {
+                called(1)
+                responder {
+                    code(200)
+                    body('<section><p>Configured host content.</p></section>', ContentType.TEXT_HTML)
+                }
+            }
+        }
+
+        when:
+        def response = service.fetchWikipediaUrl('https://wiki.example.org/wiki/Configured_page')
+
+        then:
+        response.title == 'Configured_page'
+        response.html.contains('Configured host content')
+    }
+
+    void "test search Wikipedia resolves ambiguous name to taxon page"() {
+        given:
+        server.expectations {
+            get('/api.php') {
+                query('action', 'query')
+                query('list', 'search')
+                query('srsearch', 'intitle:"Meretrix"')
+                query('srnamespace', '0')
+                query('srlimit', '20')
+                query('utf8', '1')
+                query('format', 'json')
+                called(1)
+                responder {
+                    encoder(ContentType.APPLICATION_JSON, Map, Encoders.json)
+                    code(200)
+                    body([
+                            query: [
+                                    search: [
+                                            [ns: 0, title: 'Meretrix', snippet: 'Meretrix may refer to'],
+                                            [ns: 0, title: 'Meretrix (bivalve)', snippet: '<span class="searchmatch">genus</span> of saltwater clams'],
+                                            [ns: 0, title: 'Meretrix (poem)', snippet: 'a poem by author']
+                                    ]
+                            ]
+                    ], ContentType.APPLICATION_JSON)
+                }
+            }
+            get('/page/html/Meretrix_(bivalve)') {
+                called(1)
+                responder {
+                    code(200)
+                    body('<section><table class="infobox biota">Scientific classification</table></section>', ContentType.TEXT_HTML)
+                }
+            }
+        }
+
+        when:
+        def response = service.searchWikipedia('Meretrix')
+
+        then:
+        response != null
+        response.title == 'Meretrix_(bivalve)'
+        response.html.contains('infobox biota')
+    }
+
+    void "test search Wikipedia filters candidates without taxonomic rank in snippet"() {
+        given:
+        server.expectations {
+            get('/api.php') {
+                query('action', 'query')
+                query('list', 'search')
+                query('srsearch', 'intitle:"Foo"')
+                query('srnamespace', '0')
+                query('srlimit', '20')
+                query('utf8', '1')
+                query('format', 'json')
+                called(1)
+                responder {
+                    encoder(ContentType.APPLICATION_JSON, Map, Encoders.json)
+                    code(200)
+                    body([
+                            query: [
+                                    search: [
+                                            [ns: 0, title: 'Foo (disambiguation)', snippet: 'Foo may refer to'],
+                                            [ns: 0, title: 'Foo (band)', snippet: 'a rock band']
+                                    ]
+                            ]
+                    ], ContentType.APPLICATION_JSON)
+                }
+            }
+        }
+
+        when:
+        def response = service.searchWikipedia('Foo')
+
+        then:
+        response != null
+        response.title == null
+        response.html == ''
+    }
+
+    void "test search Wikipedia rejects candidate failing taxon HTML validation"() {
+        given:
+        server.expectations {
+            get('/api.php') {
+                query('action', 'query')
+                query('list', 'search')
+                query('srsearch', 'intitle:"Badtaxon"')
+                query('srnamespace', '0')
+                query('srlimit', '20')
+                query('utf8', '1')
+                query('format', 'json')
+                called(1)
+                responder {
+                    encoder(ContentType.APPLICATION_JSON, Map, Encoders.json)
+                    code(200)
+                    body([
+                            query: [
+                                    search: [
+                                            [ns: 0, title: 'Badtaxon', snippet: 'a <span class="searchmatch">species</span> of nothing']
+                                    ]
+                            ]
+                    ], ContentType.APPLICATION_JSON)
+                }
+            }
+            get('/page/html/Badtaxon') {
+                called(1)
+                responder {
+                    code(200)
+                    body('<section><p>Not a taxon article.</p></section>', ContentType.TEXT_HTML)
+                }
+            }
+        }
+
+        when:
+        def response = service.searchWikipedia('Badtaxon')
+
+        then:
+        response != null
+        response.title == null
+        response.html == ''
+    }
+
+    void "test search Wikipedia returns empty when blacklisted"() {
+        given:
+        service.blacklist = new Blacklist(list: [[scientificName: 'Naughty nomen']] as Set)
+
+        when:
+        def response = service.searchWikipedia('Naughty nomen')
+
+        then:
+        response != null
+        response.title == null
+        response.html == ''
+    }
+
+    void "test search Wikipedia uses custom snippet pattern from config"() {
+        given:
+        service.wikipediaSnippetPattern = '(?i)clam|bivalve'
+        server.expectations {
+            get('/api.php') {
+                query('action', 'query')
+                query('list', 'search')
+                query('srsearch', 'intitle:"Paged"')
+                query('srnamespace', '0')
+                query('srlimit', '20')
+                query('utf8', '1')
+                query('format', 'json')
+                called(1)
+                responder {
+                    encoder(ContentType.APPLICATION_JSON, Map, Encoders.json)
+                    code(200)
+                    body([
+                            query: [
+                                    search: [
+                                            [ns: 0, title: 'Paged', snippet: 'a page about things'],
+                                            [ns: 0, title: 'Paged (bivalve)', snippet: 'a kind of <span class="searchmatch">clam</span>']
+                                    ]
+                            ]
+                    ], ContentType.APPLICATION_JSON)
+                }
+            }
+            get('/page/html/Paged_(bivalve)') {
+                called(1)
+                responder {
+                    code(200)
+                    body('<section><table class="infobox biota">Scientific classification</table></section>', ContentType.TEXT_HTML)
+                }
+            }
+        }
+
+        when:
+        def response = service.searchWikipedia('Paged')
+
+        then:
+        response != null
+        response.title == 'Paged_(bivalve)'
+        response.html.contains('infobox biota')
+    }
+
+    void "test search Wikipedia kingdom check rejects cross-kingdom homonym"() {
+        given:
+        server.expectations {
+            get('/api.php') {
+                query('action', 'query')
+                query('list', 'search')
+                query('srsearch', 'intitle:"Vertebrata"')
+                query('srnamespace', '0')
+                query('srlimit', '20')
+                query('utf8', '1')
+                query('format', 'json')
+                called(1)
+                responder {
+                    encoder(ContentType.APPLICATION_JSON, Map, Encoders.json)
+                    code(200)
+                    body([
+                            query: [
+                                    search: [
+                                            [ns: 0, title: 'Vertebrata', snippet: 'a <span class="searchmatch">genus</span> of algae'],
+                                            [ns: 0, title: 'Vertebrate', snippet: 'a <span class="searchmatch">genus</span> of animals']
+                                    ]
+                            ]
+                    ], ContentType.APPLICATION_JSON)
+                }
+            }
+            get('/page/html/Vertebrata') {
+                called(1)
+                responder {
+                    code(200)
+                    body('<section><table class="infobox biota">Scientific classification</table><p>Kingdom: Plantae</p></section>', ContentType.TEXT_HTML)
+                }
+            }
+        }
+
+        when:
+        def response = service.searchWikipedia('Vertebrata', 'Animalia')
+
+        then:
+        response != null
+        response.title == null
+        response.html == ''
+    }
+
+    void "test search Wikipedia kingdom check accepts same-kingdom match"() {
+        given:
+        server.expectations {
+            get('/api.php') {
+                query('action', 'query')
+                query('list', 'search')
+                query('srsearch', 'intitle:"Moggridgea rainbowi"')
+                query('srnamespace', '0')
+                query('srlimit', '20')
+                query('utf8', '1')
+                query('format', 'json')
+                called(1)
+                responder {
+                    encoder(ContentType.APPLICATION_JSON, Map, Encoders.json)
+                    code(200)
+                    body([
+                            query: [
+                                    search: [
+                                            [ns: 0, title: 'Moggridgea rainbowi', snippet: 'a <span class="searchmatch">species</span> of spider']
+                                    ]
+                            ]
+                    ], ContentType.APPLICATION_JSON)
+                }
+            }
+            get('/page/html/Moggridgea_rainbowi') {
+                called(1)
+                responder {
+                    code(200)
+                    body('<section><table class="infobox biota">Scientific classification</table><p>Kingdom: Animalia</p></section>', ContentType.TEXT_HTML)
+                }
+            }
+        }
+
+        when:
+        def response = service.searchWikipedia('Moggridgea rainbowi', 'Animalia')
+
+        then:
+        response != null
+        response.title == 'Moggridgea_rainbowi'
+        response.html.contains('infobox biota')
+    }
+
+    void "test search Wikipedia returns result when kingdom not supplied"() {
+        given:
+        server.expectations {
+            get('/api.php') {
+                query('action', 'query')
+                query('list', 'search')
+                query('srsearch', 'intitle:"Something"')
+                query('srnamespace', '0')
+                query('srlimit', '20')
+                query('utf8', '1')
+                query('format', 'json')
+                called(1)
+                responder {
+                    encoder(ContentType.APPLICATION_JSON, Map, Encoders.json)
+                    code(200)
+                    body([
+                            query: [
+                                    search: [
+                                            [ns: 0, title: 'Something', snippet: 'a <span class="searchmatch">species</span> of thing']
+                                    ]
+                            ]
+                    ], ContentType.APPLICATION_JSON)
+                }
+            }
+            get('/page/html/Something') {
+                called(1)
+                responder {
+                    code(200)
+                    body('<section><table class="infobox biota">Scientific classification</table></section>', ContentType.TEXT_HTML)
+                }
+            }
+        }
+
+        when:
+        def response = service.searchWikipedia('Something')
+
+        then:
+        response != null
+        response.title == 'Something'
+        response.html.contains('infobox biota')
+    }
+
+    void "test search Wikipedia for Chara finds alga page beyond initial top results"() {
+        given:
+        server.expectations {
+            get('/api.php') {
+                query('action', 'query')
+                query('list', 'search')
+                query('srsearch', 'intitle:"Chara"')
+                query('srnamespace', '0')
+                query('srlimit', '20')
+                query('utf8', '1')
+                query('format', 'json')
+                called(1)
+                responder {
+                    encoder(ContentType.APPLICATION_JSON, Map, Encoders.json)
+                    code(200)
+                    body([
+                            query: [
+                                    search: [
+                                            [ns: 0, title: 'Shugo Chara!', snippet: 'also known as My Guardian Characters, is a Japanese manga series'],
+                                            [ns: 0, title: 'Chara Airport', snippet: 'an airport in Russia'],
+                                            [ns: 0, title: 'Canes Venatici', snippet: 'a constellation in the northern sky'],
+                                            [ns: 0, title: 'Chara (singer)', snippet: 'a Japanese singer'],
+                                            [ns: 0, title: 'Chara (alga)', snippet: '<span class="searchmatch">Chara</span> is a <span class="searchmatch">genus</span> of charophyte green algae'],
+                                            [ns: 0, title: 'Chara people', snippet: 'a people group of Ethiopia']
+                                    ]
+                            ]
+                    ], ContentType.APPLICATION_JSON)
+                }
+            }
+            get('/page/html/Chara_(alga)') {
+                called(1)
+                responder {
+                    code(200)
+                    body('<section><table class="infobox biota">Scientific classification</table><p>Kingdom: Plantae</p></section>', ContentType.TEXT_HTML)
+                }
+            }
+        }
+
+        when:
+        def response = service.searchWikipedia('Chara', 'Plantae')
+
+        then:
+        response != null
+        response.title == 'Chara_(alga)'
+        response.html.contains('infobox biota')
+    }
+
+    void "test search Wikipedia snippet pattern does not match snippet HTML markup"() {
+        given:
+        server.expectations {
+            get('/api.php') {
+                query('action', 'query')
+                query('list', 'search')
+                query('srsearch', 'intitle:"Chara"')
+                query('srnamespace', '0')
+                query('srlimit', '20')
+                query('utf8', '1')
+                query('format', 'json')
+                called(1)
+                responder {
+                    encoder(ContentType.APPLICATION_JSON, Map, Encoders.json)
+                    code(200)
+                    body([
+                            query: [
+                                    search: [
+                                            [ns: 0, title: 'Chara Manga', snippet: 'Japanese <span class="searchmatch">Chara</span> manga'],
+                                            [ns: 0, title: 'Chara (alga)', snippet: '<span class="searchmatch">Chara</span> is a <span class="searchmatch">genus</span> of green algae']
+                                    ]
+                            ]
+                    ], ContentType.APPLICATION_JSON)
+                }
+            }
+            get('/page/html/Chara_(alga)') {
+                called(1)
+                responder {
+                    code(200)
+                    body('<section><table class="infobox biota">Scientific classification</table><p>Kingdom: Plantae</p></section>', ContentType.TEXT_HTML)
+                }
+            }
+        }
+
+        when:
+        def response = service.searchWikipedia('Chara', 'Plantae')
+
+        then:
+        response != null
+        response.title == 'Chara_(alga)'
+    }
+
+    void "test search Wikipedia falls back to disambiguation page for cross-kingdom homonym"() {
+        given:
+        server.expectations {
+            get('/api.php') {
+                query('action', 'query')
+                query('list', 'search')
+                query('srsearch', 'intitle:"Chara"')
+                query('srnamespace', '0')
+                query('srlimit', '20')
+                query('utf8', '1')
+                query('format', 'json')
+                called(1)
+                responder {
+                    encoder(ContentType.APPLICATION_JSON, Map, Encoders.json)
+                    code(200)
+                    body([
+                            query: [
+                                    search: [
+                                            [ns: 0, title: 'Chara (alga)', snippet: '<span class="searchmatch">Chara</span> is a <span class="searchmatch">genus</span> of charophyte green algae']
+                                    ]
+                            ]
+                    ], ContentType.APPLICATION_JSON)
+                }
+            }
+            get('/page/html/Chara_(alga)') {
+                called(1)
+                responder {
+                    code(200)
+                    body('<section><table class="infobox biota">Scientific classification</table><p>Kingdom: Plantae</p></section>', ContentType.TEXT_HTML)
+                }
+            }
+            get('/page/html/Chara') {
+                called(1)
+                responder {
+                    code(200)
+                    body('''<section>
+                        <p>Chara may refer to:</p>
+                        <ul>
+                            <li><a href="/wiki/Chara_(alga)">Chara (alga)</a>, a genus of algae</li>
+                            <li><a href="/wiki/Chara_(moth)">Chara (moth)</a>, a genus of moths</li>
+                            <li><a href="/wiki/Chara_(star)">Chara (star)</a></li>
+                        </ul>
+                    </section>''', ContentType.TEXT_HTML)
+                }
+            }
+            get('/page/html/Chara_(moth)') {
+                called(1)
+                responder {
+                    code(200)
+                    body('<section><table class="infobox biota">Scientific classification</table><p>Kingdom: Animalia</p></section>', ContentType.TEXT_HTML)
+                }
+            }
+        }
+
+        when:
+        def response = service.searchWikipedia('Chara', 'Animalia')
+
+        then:
+        response != null
+        response.title == 'Chara_(moth)'
+        response.html.contains('Kingdom: Animalia')
+    }
+
+    void "test search Wikipedia strips subgenus from intitle search"() {
+        given:
+        server.expectations {
+            get('/api.php') {
+                query('action', 'query')
+                query('list', 'search')
+                query('srsearch', 'intitle:"Anthochaera carunculata"')
+                query('srnamespace', '0')
+                query('srlimit', '20')
+                query('utf8', '1')
+                query('format', 'json')
+                called(1)
+                responder {
+                    encoder(ContentType.APPLICATION_JSON, Map, Encoders.json)
+                    code(200)
+                    body([
+                            query: [
+                                    search: [
+                                            [ns: 0, title: 'Red wattlebird', snippet: 'The red wattlebird (<span class="searchmatch">Anthochaera</span> <span class="searchmatch">carunculata</span>) is a passerine bird']
+                                    ]
+                            ]
+                    ], ContentType.APPLICATION_JSON)
+                }
+            }
+            get('/page/html/Red_wattlebird') {
+                called(1)
+                responder {
+                    code(200)
+                    body('<section><table class="infobox biota">Scientific classification</table><p>Kingdom: Animalia</p></section>', ContentType.TEXT_HTML)
+                }
+            }
+        }
+
+        when:
+        def response = service.searchWikipedia('Anthochaera (Anthochaera) carunculata', 'Animalia')
+
+        then:
+        response != null
+        response.title == 'Red_wattlebird'
+        response.html.contains('Kingdom: Animalia')
+    }
+
+    void "test search Wikipedia normalises disambiguated title to base name"() {
+        given:
+        server.expectations {
+            get('/api.php') {
+                query('action', 'query')
+                query('list', 'search')
+                query('srsearch', 'intitle:"Meretrix"')
+                query('srnamespace', '0')
+                query('srlimit', '20')
+                query('utf8', '1')
+                query('format', 'json')
+                called(1)
+                responder {
+                    encoder(ContentType.APPLICATION_JSON, Map, Encoders.json)
+                    code(200)
+                    body([
+                            query: [
+                                    search: [
+                                            [ns: 0, title: 'Meretrix lusoria', snippet: '<span class="searchmatch">Meretrix</span> lusoria is a <span class="searchmatch">species</span> of saltwater clam'],
+                                            [ns: 0, title: 'Meretrix (bivalve)', snippet: '<span class="searchmatch">Meretrix</span> is a <span class="searchmatch">genus</span> of saltwater clams']
+                                    ]
+                            ]
+                    ], ContentType.APPLICATION_JSON)
+                }
+            }
+            get('/page/html/Meretrix_(bivalve)') {
+                called(1)
+                responder {
+                    code(200)
+                    body('<section><table class="infobox biota">Scientific classification</table><p>Kingdom: Animalia</p></section>', ContentType.TEXT_HTML)
+                }
+            }
+        }
+
+        when:
+        def response = service.searchWikipedia('Meretrix_(bivalve)', 'Animalia')
+
+        then:
+        response != null
+        response.title == 'Meretrix_(bivalve)'
+        response.html.contains('infobox biota')
+    }
+
+    void "test search Wikipedia prefers disambiguated genus page over species when called with underscore title"() {
+        given:
+        server.expectations {
+            get('/api.php') {
+                query('action', 'query')
+                query('list', 'search')
+                query('srsearch', 'intitle:"Meretrix"')
+                query('srnamespace', '0')
+                query('srlimit', '20')
+                query('utf8', '1')
+                query('format', 'json')
+                called(1)
+                responder {
+                    encoder(ContentType.APPLICATION_JSON, Map, Encoders.json)
+                    code(200)
+                    body([
+                            query: [
+                                    search: [
+                                            [ns: 0, title: 'Meretrix lusoria', snippet: '<span class="searchmatch">Meretrix</span> lusoria is a <span class="searchmatch">species</span> of saltwater clam'],
+                                            [ns: 0, title: 'Meretrix (bivalve)', snippet: '<span class="searchmatch">Meretrix</span> is a <span class="searchmatch">genus</span> of saltwater clams']
+                                    ]
+                            ]
+                    ], ContentType.APPLICATION_JSON)
+                }
+            }
+            get('/page/html/Meretrix_lusoria') {
+                called(0)
+                responder {
+                    code(200)
+                    body('<section><table class="infobox biota">Scientific classification</table><p>Kingdom: Animalia</p></section>', ContentType.TEXT_HTML)
+                }
+            }
+            get('/page/html/Meretrix_(bivalve)') {
+                called(1)
+                responder {
+                    code(200)
+                    body('<section><table class="infobox biota">Scientific classification</table><p>Kingdom: Animalia</p></section>', ContentType.TEXT_HTML)
+                }
+            }
+        }
+
+        when:
+        def response = service.searchWikipedia('Meretrix_(bivalve)', 'Animalia')
+
+        then:
+        response != null
+        response.title == 'Meretrix_(bivalve)'
+        response.html.contains('infobox biota')
+    }
 
     void "test get BHL literature"() {
         given:
